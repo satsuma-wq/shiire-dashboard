@@ -231,8 +231,14 @@ if (NO_PUSH || !changed) process.exit(0);
 // ── push ──────────────────────────────────────────────────────────────
 const git = (...a) => execFileSync('git', a, { cwd: ROOT, encoding: 'utf8' }).trim();
 try {
-  // Mac 側で画面を直して push していることがあるので、先に取り込んでから送る
-  try { git('fetch', 'origin', 'main'); git('rebase', 'origin/main'); } catch (e) { git('rebase', '--abort'); }
+  // Mac 側で画面を直して push していることがあるので、先に取り込んでから送る。
+  // data.enc.json を書いた後なので作業ツリーは汚れている → --autostash で退避させる
+  try {
+    git('fetch', 'origin', 'main');
+    git('rebase', '--autostash', 'origin/main');
+  } catch (e) {
+    try { git('rebase', '--abort'); } catch (e2) { /* rebase が始まっていなければ何もしない */ }
+  }
   git('add', 'data.enc.json');
   const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: ROOT, encoding: 'utf8' }).trim();
   if (!staged) process.exit(0);
