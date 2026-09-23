@@ -103,8 +103,8 @@ function daysSince(ts) {
 // 「今日」の境界も JST で見る
 
 // ── 1案件を読む ──────────────────────────────────────────────────────
-function loadCase(dir) {
-  const f = join(SHIIRE, dir, 'case.json');
+function loadCase(base, dir, stageFn = stageInfo) {
+  const f = join(base, dir, 'case.json');
   if (!existsSync(f)) return null;
   let c; try { c = JSON.parse(readFileSync(f, 'utf8')); } catch (e) { return { id: dir, name: '（case.json が壊れています）', error: String(e.message).slice(0, 120), status: 'error', step: 0, flags: ['case.json が読めない'] }; }
 
@@ -112,10 +112,11 @@ function loadCase(dir) {
   const name = firstStr(c.name, c.property?.name, c.property?.address, c.property?.所在地) || '';
   const terms = c.terms || {};
   const cp = c.counterparty || {};
-  const { step, label } = stageInfo(c.stage, c);
+  const { step, label } = stageFn(c.stage, c);
 
-  const missing = Array.isArray(c.missing_docs) ? c.missing_docs : [];
-  const missingOpen = missing.filter(m => !/受領|受け取り|完了|不要/.test(String(m.status || ''))).length;
+  const missing = normalizeMissing(c.missing_docs);
+  const missingOpenList = missing.filter(m => m.open);
+  const missingOpen = missingOpenList.length;
 
   const judges = Array.isArray(c.judgements) ? c.judgements : [];
   const judgeOpen = judges.filter(j => {
@@ -160,44 +161,150 @@ function loadCase(dir) {
     idle_days: idle,
     missing_open: missingOpen,
     missing_total: missing.length,
-    judge_open: judgeOpen.map(j => ({ no: j.no || j.id || '', q: String(j.question || j.q || '').slice(0, 120) })),
+    missing_done: missing.length - missingOpen,
+    judge_open: judgeOpen.map(j => ({ no: j.no || j.id || '', q: String(j.question || j.topic || j.q || '').slice(0, 120) })),
     approval_open: approvalOpen.map(a => ({ no: a.no, kind: String(a.kind || '').slice(0, 60) })),
     ringi: short(firstStr(c.ringi?.status, c.ringi?.form), 50),
     ringi_url: firstStr(c.ringi?.doc_url),
     folder_url: firstStr(c.folder_url),
     updated_at: statSync(f).mtime.toISOString(),
     flags,
+    detail: buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle }),
+  };
+}
+
+// ── 「現在の状況」ページ用 ─────────────────────────────────────────────
+// 不足資料は案件によって形がばらばら（文字列／{doc|item, status, note}）なので揃える。
+// 「未受領」は「受領」を含むので、先に「未」を見ないと受け取り済みと読んでしまう。
+function isOpenStatus(st) {
+  const s = String(st || '');
+  if (!s) return true;
+  if (/未/.test(s)) return true;
+  return !/受領|受け取り|完了|不要|無し|なし|格納/.test(s);
+}
+function normalizeMissing(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(m => {
+    if (typeof m === 'string') {
+      if (/^（メモ）/.test(m)) return null;
+      const received = /^(受領|受け取り)/.test(m);
+      return { name: clip(m.replace(/^(受領|受け取り)[：:]/, ''), 140), status: received ? '受領' : '', open: !received };
+    }
+    if (!m || typeof m !== 'object') return null;
+    const name = firstStr(m.doc, m.item, m.name) || '（名称なし）';
+    return { name: clip(name, 100), status: clip(m.status, 60) || '', note: clip(m.note, 160) || '', open: isOpenStatus(m.status) };
+  }).filter(Boolean);
+}
+function clip(v, n) {
+  if (v == null) return null;
+  const s = String(v).replace(/\s+/g, ' ').trim();
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+// ログは5分ごとの「監視ジョブ…変化なし」で埋まるので、それを除いた“動き”だけ新しい順に拾う
+function recentLog(log, n = 6) {
+  if (!Array.isArray(log)) return [];
+  const out = [];
+  for (let i = log.length - 1; i >= 0 && out.length < n; i--) {
+    const e = log[i];
+    const body = typeof e === 'string' ? e : firstStr(e?.what, e?.text, e?.msg, e?.note, e?.event) || JSON.stringify(e);
+    const text = typeof e === 'object' && e && e.who && typeof e.what === 'string' ? `${e.who}：${body}` : body;
+    if (/監視ジョブ/.test(text) && /変化なし|新規なし/.test(text)) continue;
+    const at = typeof e === 'object' && e ? firstStr(e.at, e.time, e.ts) : null;
+    const m = text.match(/^(20\d{2}-\d{2}-\d{2}(?:[ T]\d{1,2}:[\dx]{2})?)\s*/);
+    out.push({ at: at || (m ? m[1] : ''), text: clip(m ? text.slice(m[0].length) : text, 320) });
+  }
+  return out;
+}
+// 「いま何を待っているか」を、ボールを持っている人ごとに並べる。先頭が一番の詰まりどころ
+function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle }) {
+  const waits = [];
+  for (const a of approvalOpen) waits.push({ who: '社内', what: `グループの承認待ち（#${a.no}）：${clip(a.kind, 80)}` });
+  for (const j of judgeOpen) waits.push({ who: '社内', what: `判断待ち（${String(j.no).startsWith('J') ? j.no : 'J' + j.no}）：${clip(j.question || j.topic || j.q, 120)}` });
+  const todo = Array.isArray(c.todo) ? c.todo : [];
+  for (const t of todo) { const x = typeof t === 'string' ? t : firstStr(t?.item, t?.text); if (x && !/済$|完了$/.test(x)) waits.push({ who: '社内', what: clip(x, 160) }); }
+  const r = c.ringi || null;
+  const ringiStatus = r ? firstStr(r.status) : null;
+  if (r && ringiStatus && !/承認済|完了|決裁済/.test(ringiStatus)) waits.push({ who: '社内', what: `稟議：${clip(ringiStatus, 120)}` });
+  const stage = String(c.stage || '');
+  const sentish = /_sent$|monitoring|waiting/.test(stage);
+  if (missingOpenList.length) waits.push({ who: '相手方', what: `未受領の書類 ${missingOpenList.length}件（下に一覧）` });
+  if (sentish && !approvalOpen.length && !judgeOpen.length) waits.push({ who: '相手方', what: `こちらから送付済み。返信待ち${idle != null ? `（最終送信から${idle === 0 ? '今日' : idle + '日'}）` : ''}` });
+
+  let headline;
+  if (waits.length) headline = waits[0];
+  else if (step >= 10) headline = { who: '—', what: '完了しています' };
+  else headline = { who: '—', what: '止まっている要因は見つかりません（次の工程へ進行中）' };
+
+  return {
+    headline, waits,
+    stage_raw: stage,
+    stage_note: clip(firstStr(c._stage_note, c.stage_note, c.irregular && typeof c.irregular === 'string' ? c.irregular : null), 500),
+    missing: missingOpenList,
+    judges: judgeOpen.map(j => ({ no: j.no || '', q: clip(j.question || j.topic || j.q, 300), detail: clip(j.detail, 400) })),
+    approvals: approvalOpen.map(a => ({ no: a.no, kind: clip(a.kind, 120), note: clip(a.note || a.what, 200), at: a.registered_at || a.at || '' })),
+    ringi: r ? { status: clip(ringiStatus, 200), form: clip(r.form, 120), flow: clip(r.flow, 120), applicant: clip(r.applicant, 60) } : null,
+    log: recentLog(c.log),
   };
 }
 
 // ── 集める ────────────────────────────────────────────────────────────
-const dirs = existsSync(SHIIRE)
-  ? readdirSync(SHIIRE).filter(d => { try { return statSync(join(SHIIRE, d)).isDirectory(); } catch { return false; } })
-  : [];
-const cases = dirs.map(loadCase).filter(Boolean);
-
-// 表示順：締結が近い順 → 詰まっている順 → 案件番号
-const rank = (c) => {
-  const d = daysBetween(c.contract_date);
-  return [d === null ? 9999 : (d < 0 ? 0 : d), -(c.flags?.length || 0)];
-};
-cases.sort((a, b) => { const ra = rank(a), rb = rank(b); return ra[0] - rb[0] || ra[1] - rb[1] || String(a.id).localeCompare(String(b.id)); });
-
-const active = cases.filter(c => c.status !== 'closed');
-const payload = {
-  generated_at: new Date().toISOString(),
-  source: `${os.hostname()}:${SHIIRE}`,
-  summary: {
+function collectDir(base, stageFn) {
+  const dirs = existsSync(base)
+    ? readdirSync(base).filter(d => { try { return statSync(join(base, d)).isDirectory(); } catch { return false; } })
+    : [];
+  const list = dirs.map(d => loadCase(base, d, stageFn)).filter(Boolean);
+  // 表示順：締結が近い順 → 詰まっている順 → 案件番号
+  const rank = (c) => {
+    const d = daysBetween(c.contract_date);
+    return [d === null ? 9999 : (d < 0 ? 0 : d), -(c.flags?.length || 0)];
+  };
+  list.sort((a, b) => { const ra = rank(a), rb = rank(b); return ra[0] - rb[0] || ra[1] - rb[1] || String(a.id).localeCompare(String(b.id)); });
+  return list;
+}
+function summarize(list) {
+  const active = list.filter(c => c.status !== 'closed');
+  return {
     active: active.length,
-    closed: cases.length - active.length,
+    closed: list.length - active.length,
     judge_open: active.reduce((n, c) => n + c.judge_open.length, 0),
     approval_open: active.reduce((n, c) => n + c.approval_open.length, 0),
     missing_open: active.reduce((n, c) => n + c.missing_open, 0),
     stalled: active.filter(c => c.idle_days !== null && c.idle_days >= 3 && c.step < 9).length,
     contract_7days: active.filter(c => { const d = daysBetween(c.contract_date); return d !== null && d >= 0 && d <= 7; }).length,
-  },
+  };
+}
+
+// 販売契約パイプライン（BC間・弊社＝売主）。設計書 hanbai-keiyaku/DESIGN.md の [0]〜[12]。
+// まだ実装前なので ~/hanbai は空。案件ファイルができたら、そのまま画面に載る。
+const HANBAI = process.env.HANBAI_DIR || join(os.homedir(), 'hanbai');
+const HANBAI_STEPS = [
+  '① 買付受領', '② 買主の確認', '③ 条件を固める', '④ 売渡承諾', '⑤ 契約書3点セット作成',
+  '⑥ 承認→買主へ送付', '⑦ 売却契約稟議', '⑧ 契約締結', '⑨ 手付金の入金確認', '⑩ 融資の本承認待ち',
+  '⑪ 決済準備', '⑫ 決済・引渡し', '⑬ 後処理（掲載停止など）',
+];
+function hanbaiStage(stage, c) {
+  const n = Number(c.step);
+  if (Number.isFinite(n) && n >= 0 && n <= 12) return { step: n + 1, label: HANBAI_STEPS[n].replace(/^\S+\s/, '') };
+  if (/closed|completed/.test(String(stage || ''))) return { step: 13, label: '完了' };
+  return { step: 1, label: String(stage || '進行中') };
+}
+
+const cases = collectDir(SHIIRE, stageInfo);
+const hanbaiCases = collectDir(HANBAI, hanbaiStage);
+const active = cases.filter(c => c.status !== 'closed');
+const payload = {
+  generated_at: new Date().toISOString(),
+  source: `${os.hostname()}:${SHIIRE}`,
+  summary: summarize(cases),
   steps: STEPS,
   cases,
+  hanbai: {
+    ready: false,                    // パイプライン本体ができたら true にする
+    source: `${os.hostname()}:${HANBAI}`,
+    summary: summarize(hanbaiCases),
+    steps: HANBAI_STEPS,
+    cases: hanbaiCases,
+  },
 };
 
 if (DRY) { console.log(JSON.stringify(payload, null, 2)); process.exit(0); }
