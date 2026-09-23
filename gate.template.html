@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>社内限定ページ</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Hiragino Sans', 'Noto Sans JP', sans-serif;
+    background: #1e293b;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .gate {
+    background: #fff;
+    border-radius: 12px;
+    padding: 36px 32px;
+    width: 100%;
+    max-width: 380px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.35);
+  }
+  .gate h1 {
+    font-size: 1.05rem;
+    color: #1e293b;
+    margin-bottom: 6px;
+  }
+  .gate p.lead {
+    font-size: .8rem;
+    color: #64748b;
+    margin-bottom: 22px;
+    line-height: 1.6;
+  }
+  label {
+    display: block;
+    font-size: .78rem;
+    font-weight: 600;
+    color: #475569;
+    margin-bottom: 6px;
+  }
+  input[type="password"] {
+    width: 100%;
+    padding: 11px 12px;
+    font-size: 1rem;
+    border: 1.5px solid #cbd5e1;
+    border-radius: 7px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  input[type="password"]:focus { border-color: #2563eb; }
+  button {
+    width: 100%;
+    margin-top: 16px;
+    padding: 11px;
+    font-size: .95rem;
+    font-weight: 600;
+    color: #fff;
+    background: #2563eb;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  button:hover:not(:disabled) { background: #1d4ed8; }
+  button:disabled { background: #94a3b8; cursor: default; }
+  .error {
+    margin-top: 12px;
+    font-size: .8rem;
+    color: #dc2626;
+    display: none;
+  }
+  .error.show { display: block; }
+  .note {
+    margin-top: 20px;
+    padding-top: 16px;
+    border-top: 1px solid #e2e8f0;
+    font-size: .72rem;
+    color: #94a3b8;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+<div class="gate">
+  <h1>社内限定ページ</h1>
+  <p class="lead">このページは社内向けです。合言葉を入力してください。</p>
+  <form id="gate-form">
+    <label for="pw">合言葉</label>
+    <input type="password" id="pw" autocomplete="current-password" autofocus>
+    <button type="submit" id="submit">開く</button>
+    <p class="error" id="error">合言葉が違います。もう一度お試しください。</p>
+  </form>
+  <p class="note">合言葉が分からない場合は社内担当者にお問い合わせください。</p>
+</div>
+
+<script>
+(function () {
+  var PAYLOAD = {
+    salt: '__SALT__',
+    iv: '__IV__',
+    ct: '__CIPHERTEXT__',
+    iterations: __ITERATIONS__
+  };
+  var STORAGE_KEY = 'reatex-internal-passphrase';
+
+  var form = document.getElementById('gate-form');
+  var input = document.getElementById('pw');
+  var submit = document.getElementById('submit');
+  var error = document.getElementById('error');
+
+  function b64ToBytes(s) {
+    var bin = atob(s);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return bytes;
+  }
+
+  async function decrypt(passphrase) {
+    var material = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(passphrase), 'PBKDF2', false, ['deriveKey']
+    );
+    var key = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: b64ToBytes(PAYLOAD.salt), iterations: PAYLOAD.iterations, hash: 'SHA-256' },
+      material,
+      { name: 'AES-GCM', length: 256 },
+      false, ['decrypt']
+    );
+    var plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: b64ToBytes(PAYLOAD.iv) }, key, b64ToBytes(PAYLOAD.ct)
+    );
+    return new TextDecoder().decode(plain);
+  }
+
+  function render(html) {
+    document.open();
+    document.write(html);
+    document.close();
+  }
+
+  async function unlock(passphrase, remember) {
+    var html;
+    try {
+      html = await decrypt(passphrase);
+    } catch (e) {
+      return false;
+    }
+    if (remember) {
+      try { sessionStorage.setItem(STORAGE_KEY, passphrase); } catch (e) {}
+    }
+    render(html);
+    return true;
+  }
+
+  form.addEventListener('submit', async function (e) {
+    e.preventDefault();
+    error.classList.remove('show');
+    submit.disabled = true;
+    submit.textContent = '確認中...';
+    var ok = await unlock(input.value, true);
+    if (!ok) {
+      error.classList.add('show');
+      submit.disabled = false;
+      submit.textContent = '開く';
+      input.value = '';
+      input.focus();
+    }
+  });
+
+  // 同じセッションで一度合言葉を入れていれば、そのまま開く
+  (async function () {
+    var saved = null;
+    try { saved = sessionStorage.getItem(STORAGE_KEY); } catch (e) {}
+    if (saved) await unlock(saved, false);
+  })();
+})();
+</script>
+</body>
+</html>
