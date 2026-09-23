@@ -63,9 +63,11 @@ function stageInfo(stage, c) {
 
 // ── 小道具 ────────────────────────────────────────────────────────────
 const WAREKI = { 令和: 2018 };
+// 日付欄は「2026-09-24（木）15時を打診（#244）」「契約から3か月取得可（2026-09-19 吉澤さん）」のように
+// 括弧の中に“発言日”が入る。括弧より前だけを見ないと、注記の日付を決済日と読んでしまう。
 function pickDate(v) {
   if (!v) return null;
-  const s = String(v);
+  const s = String(v).split(/[（(]/)[0];
   let m = s.match(/(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})/);
   if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}-${String(m[3]).padStart(2, '0')}`;
   m = s.match(/(令和)\s*(\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
@@ -83,18 +85,22 @@ function firstStr(...vals) {
   for (const v of vals) { if (typeof v === 'string' && v.trim()) return v.trim(); }
   return null;
 }
-const today = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); };
+const today = () => { const d = new Date(Date.now() + 9 * 3600000); return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())); };
 function daysBetween(isoDate) {
   if (!isoDate) return null;
   const [y, m, d] = isoDate.split('-').map(Number);
-  return Math.round((new Date(y, m - 1, d) - today()) / 86400000);
+  return Math.round((Date.UTC(y, m - 1, d) - today()) / 86400000);
 }
+// 案件ファイルの時刻は JST で書かれている。nemo は UTC で動くので明示しないと9時間ずれる。
 function daysSince(ts) {
   if (!ts) return null;
-  const t = Date.parse(String(ts).replace(' ', 'T'));
+  let s = String(ts).trim().replace(' ', 'T');
+  if (!/[Zz]|[+-]\d{2}:?\d{2}$/.test(s)) s += '+09:00';
+  const t = Date.parse(s);
   if (Number.isNaN(t)) return null;
   return Math.floor((Date.now() - t) / 86400000);
 }
+// 「今日」の境界も JST で見る
 
 // ── 1案件を読む ──────────────────────────────────────────────────────
 function loadCase(dir) {
@@ -225,6 +231,8 @@ if (NO_PUSH || !changed) process.exit(0);
 // ── push ──────────────────────────────────────────────────────────────
 const git = (...a) => execFileSync('git', a, { cwd: ROOT, encoding: 'utf8' }).trim();
 try {
+  // Mac 側で画面を直して push していることがあるので、先に取り込んでから送る
+  try { git('fetch', 'origin', 'main'); git('rebase', 'origin/main'); } catch (e) { git('rebase', '--abort'); }
   git('add', 'data.enc.json');
   const staged = execFileSync('git', ['diff', '--cached', '--name-only'], { cwd: ROOT, encoding: 'utf8' }).trim();
   if (!staged) process.exit(0);
