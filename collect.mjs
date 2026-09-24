@@ -345,7 +345,8 @@ function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle, 
 // ── 集める ────────────────────────────────────────────────────────────
 function collectDir(base, stageFn) {
   const dirs = existsSync(base)
-    ? readdirSync(base).filter(d => { try { return statSync(join(base, d)).isDirectory(); } catch { return false; } })
+    // TEST- で始まるフォルダは電子契約などの開通テスト用。記録として残すが画面には出さない
+    ? readdirSync(base).filter(d => { if (/^TEST-/i.test(d)) return false; try { return statSync(join(base, d)).isDirectory(); } catch { return false; } })
     : [];
   const list = dirs.map(d => loadCase(base, d, stageFn)).filter(Boolean);
   // 表示順：締結が近い順 → 詰まっている順 → 案件番号
