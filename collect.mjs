@@ -48,6 +48,11 @@ function stageInfo(stage, c) {
   if (/closed|completed/.test(s)) return { step: 10, label: '完了' };
   if (/final_agreed/.test(s)) {
     const r = c.ringi || {};
+    // 契約稟議が下りて、手付金の段取り（振込稟議・登録）も済んだ／手で済ませた → 締結待ち
+    const furikomiDone = c.tetsuke_furikomi?.requested_at || c.tetsuke_furikomi?.requested_to
+      || manualNotes(c).some(n => /^完了/.test(n) && /振込/.test(n));
+    if (RINGI_OK.test(String(r.status || '')) && furikomiDone) return { step: 9, label: '締結待ち' };
+    if (RINGI_OK.test(String(r.status || ''))) return { step: 8, label: '手付金の振込準備' };
     if (r.tetsuke || c.tetsuke_furikomi) return { step: 8, label: '手付金の振込準備' };
     if (r.doc_url || r.requested_at) return { step: 7, label: '稟議（申請待ち／承認待ち）' };
     return { step: 6, label: '先方了承。稟議へ' };
@@ -169,7 +174,7 @@ function loadCase(base, dir, stageFn = stageInfo) {
     folder_url: firstStr(c.folder_url),
     updated_at: statSync(f).mtime.toISOString(),
     flags,
-    detail: buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle }),
+    detail: buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle, missingTotal: missing.length }),
   };
 }
 
@@ -215,8 +220,96 @@ function recentLog(log, n = 6) {
   }
   return out;
 }
+// ── 細かい工程（あと何が残っているか） ─────────────────────────────────
+// 10段階の工程をさらに細かく割って、案件ファイルに残っている記録から「済み／不要／まだ」を決める。
+// 担当者が手で済ませた作業は、ringi.todo などに「完了：反社チェック…」「完了（不要）：手付金の振込登録…」と
+// 書かれているので、その文言も拾う。拾えないものは case.json の checklist で上書きできる:
+//   "checklist": { "furikomi_ringi": "skip", "hansha": { "state": "done", "note": "吉澤さんが手で実施" } }
+const RINGI_OK = /承認完了|承認済|決裁済/;
+function manualNotes(c) {
+  const out = [];
+  const push = (v) => { const s = typeof v === 'string' ? v : firstStr(v?.item, v?.text); if (s) out.push(s); };
+  for (const arr of [c.ringi?.todo, c.todo, c.tetsuke_furikomi?.todo]) if (Array.isArray(arr)) arr.forEach(push);
+  push(c.ringi?.status);
+  return out;
+}
+function buildChecklist(c, { step, missingOpenList, missingTotal }) {
+  const stage = String(c.stage || '');
+  const closed = c.status === 'closed' || /closed|completed/.test(stage);
+  const r = c.ringi || {};
+  const tf = c.tetsuke_furikomi || null;
+  const cal = c.calendar || {};
+  const tk = c.teiketsu || null;
+  const notes = manualNotes(c);
+  // 「完了：…」「完了（不要）：…」の行から、その作業が手で済んでいるかを拾う
+  const manual = (re) => {
+    const s = notes.find(n => /^完了/.test(n) && re.test(n));
+    return s ? { state: /不要/.test(s.slice(0, 8)) ? 'skip' : 'done', note: clip(s.replace(/^完了(（[^）]*）)?[：:]\s*/, ''), 140) } : null;
+  };
+  const ringiOk = RINGI_OK.test(String(r.status || ''));
+  const ringiApplied = ringiOk || /申請済|申請中|承認待/.test(String(r.status || ''));
+  const furikomiManual = manual(/振込/);
+  const ov = (c.checklist && typeof c.checklist === 'object') ? c.checklist : {};
+
+  const X = (key, phase, name, who, auto) => {
+    let it = { key, phase, name, who, state: auto?.state || 'todo', note: auto?.note || '' };
+    const o = ov[key];
+    if (typeof o === 'string') it.state = o;
+    else if (o && typeof o === 'object') it = { ...it, ...o };
+    if (closed && it.state === 'todo') it.state = 'done';
+    return it;
+  };
+  const done = (note = '') => ({ state: 'done', note });
+  const todo = (note = '') => ({ state: 'todo', note });
+
+  const list = [
+    X('ok', '契約書', '契約OKの報告を受ける', '社内', done()),
+    X('collect', '契約書', 'メール・資料を洗い出し、契約条件を固める', '社内', step >= 3 ? done() : todo()),
+    X('draft', '契約書', /C/.test(String(c.terms?.rule || '')) ? '契約書・重説のドラフト（物元が作成→弊社でチェック）' : '契約書・重説（案）を作る', '社内',
+      step >= 4 || /received|draft\d/.test(stage) ? done() : todo()),
+    X('send', '契約書', 'グループ承認を取って先方へ送付', '社内', step >= 5 ? done(c.last_sent_at ? `最終送信 ${String(c.last_sent_at).slice(0, 16)}` : '') : todo()),
+    X('agree', '契約書', '先方の了承（条件が確定）', '相手方', step >= 6 ? done() : todo()),
+    X('docs', '契約書', '不足書類をすべて受け取る', '相手方',
+      missingOpenList.length ? todo(`残り ${missingOpenList.length}件／全${missingTotal}件`) : done(missingTotal ? `全${missingTotal}件 受領` : '')),
+
+    X('hansha', '社内手続き', '反社チェック（売主）', '社内',
+      c.hansha?.結果 ? done(`${c.hansha.結果}（受付 ${c.hansha.受付番号 || '—'}・${c.hansha.照会日 || ''}）`) : manual(/反社/) || todo()),
+    X('kintone', '社内手続き', 'kintone に物件データを入力', '社内',
+      c.kintone?.record_id ? done(`レコード ${c.kintone.record_id}`) : manual(/kintone/i) || todo()),
+    X('ringi_doc', '社内手続き', '契約稟議書（備考欄）を作る', '社内', r.doc_url ? done(r.prepared_at ? `${r.prepared_at} 作成` : '') : todo()),
+    X('ringi_apply', '社内手続き', `契約稟議を申請${r.applicant ? `（${String(r.applicant).replace(/（.*$/, '')}さん）` : ''}`, '社内',
+      ringiApplied ? done() : manual(/稟議の?申請/) || todo(r.status ? clip(r.status, 80) : '')),
+    X('ringi_ok', '社内手続き', '契約稟議の承認', '社内',
+      ringiOk ? done(clip(String(r.status).match(/承認[^。]*/)?.[0] || '', 80)) : manual(/稟議の承認/) || todo()),
+
+    X('furikomi_sheet', '手付金', '振込管理シートに記入', '社内',
+      tf?.furikomi_sheet || tf?.sheet_row ? done(tf.sheet_row ? `${tf.sheet_row}行目` : '') : furikomiManual || todo()),
+    X('furikomi_ringi', '手付金', '手付金の振込稟議書を作る', '社内',
+      tf?.doc_url ? done(tf.created_at ? `${tf.created_at} 作成` : '') : furikomiManual || todo()),
+    X('furikomi_req', '手付金', `振込登録を依頼（${tf?.requested_to ? String(tf.requested_to).replace(/（.*$/, '') : '土田'}さん）`, '社内',
+      tf?.requested_at || tf?.requested_to ? done(tf.due ? `期限 ${tf.due}` : '') : furikomiManual || todo()),
+
+    X('cal_contract', '締結', 'カレンダーに契約日を登録（Mgr招待）', '社内',
+      cal.contract_event_id ? done(cal.contract_at || '') : todo()),
+    X('sign', '締結', '契約の締結（署名・押印）', '社内',
+      closed || tk?.status === 'completed' ? done(tk?.completed_at ? `${tk.completed_at} 締結` : '')
+        : todo(clip(firstStr(cal.contract_note, cal.contract_at, tk?.status ? `電子契約 ${tk.status}` : null) || '', 140))),
+    X('cal_settle', '締結', 'カレンダーに決済日を登録', '社内',
+      cal.settlement_event_id ? done(cal.settlement_at || '') : todo(cal.settlement_at || '')),
+    X('kintone_done', '締結', 'kintone を「仕入れ契約完了」にする', '社内', closed ? done() : todo()),
+  ];
+  const next = list.find(i => i.state === 'todo') || null;
+  if (next) next.state = 'next';
+  return {
+    items: list,
+    left: list.filter(i => i.state === 'todo' || i.state === 'next').length,
+    total: list.length,
+    next: next ? { name: next.name, who: next.who, note: next.note } : null,
+  };
+}
+
 // 「いま何を待っているか」を、ボールを持っている人ごとに並べる。先頭が一番の詰まりどころ
-function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle }) {
+function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle, missingTotal }) {
   const waits = [];
   for (const a of approvalOpen) waits.push({ who: '社内', what: `グループの承認待ち（#${a.no}）：${clip(a.kind, 80)}` });
   for (const j of judgeOpen) waits.push({ who: '社内', what: `判断待ち（${String(j.no).startsWith('J') ? j.no : 'J' + j.no}）：${clip(j.question || j.topic || j.q, 120)}` });
@@ -230,13 +323,15 @@ function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle }
   if (missingOpenList.length) waits.push({ who: '相手方', what: `未受領の書類 ${missingOpenList.length}件（下に一覧）` });
   if (sentish && !approvalOpen.length && !judgeOpen.length) waits.push({ who: '相手方', what: `こちらから送付済み。返信待ち${idle != null ? `（最終送信から${idle === 0 ? '今日' : idle + '日'}）` : ''}` });
 
+  const checklist = buildChecklist(c, { step, missingOpenList, missingTotal });
   let headline;
   if (waits.length) headline = waits[0];
   else if (step >= 10) headline = { who: '—', what: '完了しています' };
+  else if (checklist.next) headline = { who: checklist.next.who, what: `次は「${checklist.next.name}」${checklist.next.note ? `：${checklist.next.note}` : ''}` };
   else headline = { who: '—', what: '止まっている要因は見つかりません（次の工程へ進行中）' };
 
   return {
-    headline, waits,
+    headline, waits, checklist,
     stage_raw: stage,
     stage_note: clip(firstStr(c._stage_note, c.stage_note, c.irregular && typeof c.irregular === 'string' ? c.irregular : null), 500),
     missing: missingOpenList,
