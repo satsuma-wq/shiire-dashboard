@@ -118,7 +118,9 @@ function loadCase(base, dir, stageFn = stageInfo) {
   const id = firstStr(c.case_id, c.caseId) || dir;
   const name = firstStr(c.name, c.property?.name, c.property?.address, c.property?.所在地) || '';
   const terms = c.terms || {};
-  const cp = c.counterparty || {};
+  // 販売側は相手方＝買主（buyer）。金額は数値で入っていることがある
+  const cp = c.counterparty || (c.buyer ? { company: c.buyer.company || c.buyer.name, person: c.buyer.company ? c.buyer.name : null } : {});
+  const yen = (v) => typeof v === 'number' && v > 0 ? v.toLocaleString('ja-JP') + '円' : v;
   const { step, label } = stageFn(c.stage, c);
   // 工程の数え方はパイプラインごとに違う（仕入れ＝10段階・販売＝14段階）
   const P = stageFn.cfg || { done: 10, signed: 9, ringi: 6, checklist: true };
@@ -166,8 +168,8 @@ function loadCase(base, dir, stageFn = stageInfo) {
     assignee: firstStr(c.assignee?.name, c.sales_rep) || '—',
     counterparty: [firstStr(cp.company, cp.name), firstStr(cp.person)].filter(Boolean).join('／') || '—',
     role: firstStr(cp.role) || '',
-    price: short(firstStr(terms.price, terms.売買価格)),
-    deposit: short(firstStr(terms.deposit, terms.手付金)),
+    price: short(firstStr(yen(terms.price), terms.売買価格)),
+    deposit: short(firstStr(yen(terms.deposit), terms.手付金)),
     contract_date: contractDate,
     closing_date: closingDate,
     contract_method: short(firstStr(terms.contract_method), 40),
