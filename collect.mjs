@@ -120,6 +120,8 @@ function loadCase(base, dir, stageFn = stageInfo) {
   const terms = c.terms || {};
   const cp = c.counterparty || {};
   const { step, label } = stageFn(c.stage, c);
+  // 工程の数え方はパイプラインごとに違う（仕入れ＝10段階・販売＝14段階）
+  const P = stageFn.cfg || { done: 10, signed: 9, ringi: 6, checklist: true };
 
   const missing = normalizeMissing(c.missing_docs);
   const missingOpenList = missing.filter(m => m.open);
@@ -129,6 +131,7 @@ function loadCase(base, dir, stageFn = stageInfo) {
   const judgeOpen = judges.filter(j => {
     const st = String(j.status || '');
     const ans = j.answer;
+    if (j.answers || j.effect) return false;   // 「答え一式」を後から書き足す形の記録（回答済み）
     return !/answered|closed|済/.test(st) && (ans === null || ans === undefined || ans === '');
   });
 
@@ -136,7 +139,9 @@ function loadCase(base, dir, stageFn = stageInfo) {
   const approvalOpen = approvals.filter(a => {
     const st = String(a.status || '');
     // 「done（★未送信）」のように、送らずに閉じた下書きは「未」を含んでも承認待ちではない
-    if (st === '' || /^(done|sent|dropped|closed)|済/.test(st)) return false;
+    // 販売側の H 承認は status を持たず answer に OK が入る形
+    if (st === '') return 'answer' in a && (a.answer === null || a.answer === '');
+    if (/^(done|sent|dropped|closed)|済/.test(st)) return false;
     return /waiting|pending|未/.test(st);
   });
 
@@ -146,12 +151,12 @@ function loadCase(base, dir, stageFn = stageInfo) {
 
   const flags = [];
   const dToContract = daysBetween(contractDate);
-  if (dToContract !== null && dToContract >= 0 && dToContract <= 7 && step < 10) flags.push(`契約日まで${dToContract}日`);
-  if (dToContract !== null && dToContract < 0 && step < 9) flags.push(`契約日を${-dToContract}日過ぎています`);
+  if (dToContract !== null && dToContract >= 0 && dToContract <= 7 && step < P.done) flags.push(`契約日まで${dToContract}日`);
+  if (dToContract !== null && dToContract < 0 && step < P.signed) flags.push(`契約日を${-dToContract}日過ぎています`);
   if (judgeOpen.length) flags.push(`ジャッジ待ち ${judgeOpen.length}件`);
   if (approvalOpen.length) flags.push(`承認待ち ${approvalOpen.length}件`);
-  if (idle !== null && idle >= 3 && step < 9) flags.push(`${idle}日動いていません`);
-  if (step >= 6 && !(c.ringi && (c.ringi.doc_url || c.ringi.requested_at))) flags.push('稟議書がまだです');
+  if (idle !== null && idle >= 3 && step < P.signed) flags.push(`${idle}日動いていません`);
+  if (step >= P.ringi && step < P.done && !(c.ringi && (c.ringi.doc_url || c.ringi.requested_at))) flags.push('稟議書がまだです');
 
   return {
     id, name,
@@ -171,14 +176,14 @@ function loadCase(base, dir, stageFn = stageInfo) {
     missing_open: missingOpen,
     missing_total: missing.length,
     missing_done: missing.length - missingOpen,
-    judge_open: judgeOpen.map(j => ({ no: j.no || j.id || '', q: String(j.question || j.topic || j.q || '').slice(0, 120) })),
-    approval_open: approvalOpen.map(a => ({ no: a.no, kind: String(a.kind || '').slice(0, 60) })),
+    judge_open: judgeOpen.map(j => ({ no: j.no || j.id || '', q: String(j.question || j.topic || j.text || j.q || '').slice(0, 120) })),
+    approval_open: approvalOpen.map(a => ({ no: a.no, kind: String(a.kind || a.for || a.what || '').slice(0, 60) })),
     ringi: short(firstStr(c.ringi?.status, c.ringi?.form), 50),
     ringi_url: firstStr(c.ringi?.doc_url),
     folder_url: firstStr(c.folder_url),
     updated_at: statSync(f).mtime.toISOString(),
     flags,
-    detail: buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle, missingTotal: missing.length }),
+    detail: buildDetail(c, { step, label, P, judgeOpen, approvalOpen, missingOpenList, idle, missingTotal: missing.length }),
   };
 }
 
@@ -313,10 +318,10 @@ function buildChecklist(c, { step, missingOpenList, missingTotal }) {
 }
 
 // 「いま何を待っているか」を、ボールを持っている人ごとに並べる。先頭が一番の詰まりどころ
-function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle, missingTotal }) {
+function buildDetail(c, { step, label, P, judgeOpen, approvalOpen, missingOpenList, idle, missingTotal }) {
   const waits = [];
-  for (const a of approvalOpen) waits.push({ who: '社内', what: `グループの承認待ち（#${a.no}）：${clip(a.kind, 80)}` });
-  for (const j of judgeOpen) waits.push({ who: '社内', what: `判断待ち（${String(j.no).startsWith('J') ? j.no : 'J' + j.no}）：${clip(j.question || j.topic || j.q, 120)}` });
+  for (const a of approvalOpen) waits.push({ who: '社内', what: `グループの承認待ち（${/^H/.test(String(a.no)) ? '' : '#'}${a.no}）：${clip(a.kind || a.for || a.what, 80)}` });
+  for (const j of judgeOpen) waits.push({ who: '社内', what: `判断待ち（${String(j.no).startsWith('J') ? j.no : 'J' + j.no}）：${clip(j.question || j.topic || j.text || j.q, 120)}` });
   const todo = Array.isArray(c.todo) ? c.todo : [];
   for (const t of todo) { const x = typeof t === 'string' ? t : firstStr(t?.item, t?.text); if (x && !/済$|完了$/.test(x)) waits.push({ who: '社内', what: clip(x, 160) }); }
   const r = c.ringi || null;
@@ -327,10 +332,14 @@ function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle, 
   if (missingOpenList.length) waits.push({ who: '相手方', what: `未受領の書類 ${missingOpenList.length}件（下に一覧）` });
   if (sentish && !approvalOpen.length && !judgeOpen.length) waits.push({ who: '相手方', what: `こちらから送付済み。返信待ち${idle != null ? `（最終送信から${idle === 0 ? '今日' : idle + '日'}）` : ''}` });
 
-  const checklist = buildChecklist(c, { step, missingOpenList, missingTotal });
+  // 販売側は仕入れのチェックリストが当てはまらないので、案件ファイルの next_action を使う
+  const checklist = P.checklist ? buildChecklist(c, { step, missingOpenList, missingTotal }) : { items: [], left: 0, total: 0, next: null };
+  const nextAction = firstStr(c.next_action?.what, c.next_action);
   let headline;
-  if (waits.length) headline = waits[0];
-  else if (step >= 10) headline = { who: '—', what: '完了しています' };
+  if (c.waiting_for) headline = { who: firstStr(c.waiting_for.who) || '—', what: clip(firstStr(c.waiting_for.what, c.waiting_for), 160) };
+  else if (waits.length) headline = waits[0];
+  else if (step >= P.done) headline = { who: '—', what: '完了しています' };
+  else if (!P.checklist) headline = { who: firstStr(c.next_action?.who) || '社内', what: nextAction ? `次は「${clip(nextAction, 140)}」` : `いまの工程：${label}` };
   else if (checklist.next) headline = { who: checklist.next.who, what: `次は「${checklist.next.name}」${checklist.next.note ? `：${checklist.next.note}` : ''}` };
   else headline = { who: '—', what: '止まっている要因は見つかりません（次の工程へ進行中）' };
 
@@ -339,8 +348,8 @@ function buildDetail(c, { step, judgeOpen, approvalOpen, missingOpenList, idle, 
     stage_raw: stage,
     stage_note: clip(firstStr(c._stage_note, c.stage_note, c.irregular && typeof c.irregular === 'string' ? c.irregular : null), 500),
     missing: missingOpenList,
-    judges: judgeOpen.map(j => ({ no: j.no || '', q: clip(j.question || j.topic || j.q, 300), detail: clip(j.detail, 400) })),
-    approvals: approvalOpen.map(a => ({ no: a.no, kind: clip(a.kind, 120), note: clip(a.note || a.what, 200), at: a.registered_at || a.at || '' })),
+    judges: judgeOpen.map(j => ({ no: j.no || '', q: clip(j.question || j.topic || j.text || j.q, 300), detail: clip(j.detail, 400) })),
+    approvals: approvalOpen.map(a => ({ no: a.no, kind: clip(a.kind || a.for || a.what, 120), note: clip(a.note || a.what, 200), at: a.registered_at || a.asked_at || a.at || '' })),
     ringi: r ? { status: clip(ringiStatus, 200), form: clip(r.form, 120), flow: clip(r.flow, 120), applicant: clip(r.applicant, 60) } : null,
     log: recentLog(c.log),
   };
@@ -377,17 +386,34 @@ function summarize(list) {
 // 販売契約パイプライン（BC間・弊社＝売主）。設計書 hanbai-keiyaku/DESIGN.md の [0]〜[12]。
 // まだ実装前なので ~/hanbai は空。案件ファイルができたら、そのまま画面に載る。
 const HANBAI = process.env.HANBAI_DIR || join(os.homedir(), 'hanbai');
+// 表示は14段階。案件ファイルの step（DESIGN.md の [0]〜[20]）をまとめて対応させる。
 const HANBAI_STEPS = [
-  '① 買付受領', '② 買主の確認', '③ 条件を固める', '④ 売渡承諾', '⑤ 契約書3点セット作成',
-  '⑥ 承認→買主へ送付', '⑦ 売却契約稟議', '⑧ 契約締結', '⑨ 手付金の入金確認', '⑩ 融資の本承認待ち',
-  '⑪ 決済準備', '⑫ 決済・引渡し', '⑬ 後処理（掲載停止など）',
+  '① 買付受付・仮登録', '② 意思確認', '③ 条件を固める', '④ 正式登録', '⑤ 買主の確認', '⑥ 売渡承諾',
+  '⑦ kintone 入力', '⑧ 契約書3点の作成', '⑨ 承認→買主へ送付', '⑩ 契約稟議・振込登録', '⑪ 契約締結',
+  '⑫ 入金・火災保険・融資', '⑬ 決済準備・決済', '⑭ 後処理',
 ];
+// DESIGN.md の [n] → 表示の段（1始まり）
+const HANBAI_MAP = [1, 1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 10, 11, 12, 12, 12, 13, 13, 13, 14];
 function hanbaiStage(stage, c) {
-  const n = Number(c.step);
-  if (Number.isFinite(n) && n >= 0 && n <= 12) return { step: n + 1, label: HANBAI_STEPS[n].replace(/^\S+\s/, '') };
-  if (/closed|completed/.test(String(stage || ''))) return { step: 13, label: '完了' };
-  return { step: 1, label: String(stage || '進行中') };
+  const s = String(stage || '');
+  const lbl = (k) => HANBAI_STEPS[k - 1].replace(/^\S+\s/, '');
+  if (/closed|completed|cancel/.test(s) || c.status === 'closed') return { step: 14, label: '完了' };
+  if (/monitor_only/.test(s)) return { step: 1, label: '見守りのみ（パイプライン外で進行中）' };
+  // stage からも推定し、step と食い違うときは進んでいる方を採る（step の書き忘れがあるため）
+  let g = 2;
+  if (/sent_v|_sent$/.test(s)) g = 10;
+  else if (/v\d|draft|audit/.test(s)) g = 9;
+  else if (/kintone/.test(s)) g = 8;
+  else if (/uriwatashi|shodaku/.test(s)) g = 7;
+  else if (/active|hansha|honnin/.test(s)) g = 6;
+  else if (/joken|terms/.test(s)) g = 4;
+  const m = Number(c.step);
+  let n = (c.step === null || c.step === undefined || !Number.isFinite(m)) ? g : Math.max(m, g);
+  n = Math.max(0, Math.min(20, Math.round(n)));
+  const k = HANBAI_MAP[n];
+  return { step: k, label: lbl(k) };
 }
+hanbaiStage.cfg = { done: 14, signed: 11, ringi: 10, checklist: false };
 
 const cases = collectDir(SHIIRE, stageInfo);
 const hanbaiCases = collectDir(HANBAI, hanbaiStage);
@@ -399,7 +425,7 @@ const payload = {
   steps: STEPS,
   cases,
   hanbai: {
-    ready: false,                    // パイプライン本体ができたら true にする
+    ready: true,                     // 2026-09-29 本番運用開始（薩摩さん指示）
     source: `${os.hostname()}:${HANBAI}`,
     summary: summarize(hanbaiCases),
     steps: HANBAI_STEPS,
