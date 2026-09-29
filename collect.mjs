@@ -326,7 +326,8 @@ function buildDetail(c, { step, label, P, judgeOpen, approvalOpen, missingOpenLi
   const waits = [];
   for (const a of approvalOpen) waits.push({ who: '社内', what: `グループの承認待ち（${/^H/.test(String(a.no)) ? '' : '#'}${a.no}）：${clip(a.kind || a.for || a.what, 80)}` });
   for (const j of judgeOpen) waits.push({ who: '社内', what: `判断待ち（${String(j.no).startsWith('J') ? j.no : 'J' + j.no}）：${clip(j.question || j.topic || j.text || j.q, 120)}` });
-  const todo = Array.isArray(c.todo) ? c.todo : [];
+  // 契約済みの案件では、契約前の作業メモ（todo）は古いので出さない
+  const todo = step >= P.signedAt ? [] : (Array.isArray(c.todo) ? c.todo : []);
   for (const t of todo) { const x = typeof t === 'string' ? t : firstStr(t?.item, t?.text); if (x && !/済$|完了$/.test(x)) waits.push({ who: '社内', what: clip(x, 160) }); }
   const r = c.ringi || null;
   const ringiStatus = r ? firstStr(r.status) : null;
