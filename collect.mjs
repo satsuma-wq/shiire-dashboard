@@ -46,6 +46,8 @@ const STEPS = [
 function stageInfo(stage, c) {
   const s = String(stage || '');
   if (/closed|completed/.test(s)) return { step: 10, label: '完了' };
+  // 契約は済んだが、販売契約パイプラインに移るまで元のメールだけ見ている状態
+  if (/post_contract/.test(s)) return { step: 10, label: '契約済み（メール監視中）' };
   if (/final_agreed/.test(s)) {
     const r = c.ringi || {};
     // 契約稟議が下りて、手付金の段取り（振込稟議・登録）も済んだ／手で済ませた → 締結待ち
@@ -133,7 +135,9 @@ function loadCase(base, dir, stageFn = stageInfo) {
   const approvals = Array.isArray(c.approvals) ? c.approvals : [];
   const approvalOpen = approvals.filter(a => {
     const st = String(a.status || '');
-    return st === '' ? false : /waiting|pending|未/.test(st);
+    // 「done（★未送信）」のように、送らずに閉じた下書きは「未」を含んでも承認待ちではない
+    if (st === '' || /^(done|sent|dropped|closed)|済/.test(st)) return false;
+    return /waiting|pending|未/.test(st);
   });
 
   const contractDate = pickDate(terms.contract_date ?? terms.契約日);
@@ -142,7 +146,7 @@ function loadCase(base, dir, stageFn = stageInfo) {
 
   const flags = [];
   const dToContract = daysBetween(contractDate);
-  if (dToContract !== null && dToContract >= 0 && dToContract <= 7) flags.push(`契約日まで${dToContract}日`);
+  if (dToContract !== null && dToContract >= 0 && dToContract <= 7 && step < 10) flags.push(`契約日まで${dToContract}日`);
   if (dToContract !== null && dToContract < 0 && step < 9) flags.push(`契約日を${-dToContract}日過ぎています`);
   if (judgeOpen.length) flags.push(`ジャッジ待ち ${judgeOpen.length}件`);
   if (approvalOpen.length) flags.push(`承認待ち ${approvalOpen.length}件`);
@@ -235,7 +239,7 @@ function manualNotes(c) {
 }
 function buildChecklist(c, { step, missingOpenList, missingTotal }) {
   const stage = String(c.stage || '');
-  const closed = c.status === 'closed' || /closed|completed/.test(stage);
+  const closed = c.status === 'closed' || /closed|completed|post_contract/.test(stage);
   const r = c.ringi || {};
   const tf = c.tetsuke_furikomi || null;
   const cal = c.calendar || {};
@@ -366,7 +370,7 @@ function summarize(list) {
     approval_open: active.reduce((n, c) => n + c.approval_open.length, 0),
     missing_open: active.reduce((n, c) => n + c.missing_open, 0),
     stalled: active.filter(c => c.idle_days !== null && c.idle_days >= 3 && c.step < 9).length,
-    contract_7days: active.filter(c => { const d = daysBetween(c.contract_date); return d !== null && d >= 0 && d <= 7; }).length,
+    contract_7days: active.filter(c => { const d = daysBetween(c.contract_date); return c.step < 10 && d !== null && d >= 0 && d <= 7; }).length,
   };
 }
 
