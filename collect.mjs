@@ -48,6 +48,7 @@ function stageInfo(stage, c) {
   if (/closed|completed/.test(s)) return { step: 10, label: '完了' };
   // 契約は済んだが、販売契約パイプラインに移るまで元のメールだけ見ている状態
   if (/post_contract/.test(s)) return { step: 10, label: '契約済み（メール監視中）' };
+  if (/ringi_done/.test(s)) return { step: 8, label: '稟議完了（振込・締結の準備）' };
   if (/final_agreed/.test(s)) {
     const r = c.ringi || {};
     // 契約稟議が下りて、手付金の段取り（振込稟議・登録）も済んだ／手で済ませた → 締結待ち
@@ -123,7 +124,7 @@ function loadCase(base, dir, stageFn = stageInfo) {
   const yen = (v) => typeof v === 'number' && v > 0 ? v.toLocaleString('ja-JP') + '円' : v;
   const { step, label } = stageFn(c.stage, c);
   // 工程の数え方はパイプラインごとに違う（仕入れ＝10段階・販売＝14段階）
-  const P = stageFn.cfg || { done: 10, signed: 9, ringi: 6, checklist: true };
+  const P = stageFn.cfg || { done: 10, signed: 9, signedAt: 10, ringi: 6, checklist: true };
 
   const missing = normalizeMissing(c.missing_docs);
   const missingOpenList = missing.filter(m => m.open);
@@ -165,6 +166,7 @@ function loadCase(base, dir, stageFn = stageInfo) {
     status: c.status || 'active',
     stage: c.stage || '',
     step, step_label: label,
+    signed: step >= P.signedAt || (c.teiketsu && c.teiketsu.status === 'completed') || false,   // 契約締結済み（画面で分けて出す）
     assignee: firstStr(c.assignee?.name, c.sales_rep) || '—',
     counterparty: [firstStr(cp.company, cp.name), firstStr(cp.person)].filter(Boolean).join('／') || '—',
     role: firstStr(cp.role) || '',
@@ -373,12 +375,14 @@ function collectDir(base, stageFn) {
   return list;
 }
 function summarize(list) {
-  const active = list.filter(c => c.status !== 'closed');
+  const open = list.filter(c => c.status !== 'closed');
+  const active = open.filter(c => !c.signed);   // 契約済み（締結後の監視だけ）は「進行中」に数えない
   return {
     active: active.length,
+    signed: open.length - active.length,
     closed: list.length - active.length,
-    judge_open: active.reduce((n, c) => n + c.judge_open.length, 0),
-    approval_open: active.reduce((n, c) => n + c.approval_open.length, 0),
+    judge_open: open.reduce((n, c) => n + c.judge_open.length, 0),   // 契約済みの案件の返信承認も数える
+    approval_open: open.reduce((n, c) => n + c.approval_open.length, 0),   // 契約済みの案件の返信承認も数える
     missing_open: active.reduce((n, c) => n + c.missing_open, 0),
     stalled: active.filter(c => c.idle_days !== null && c.idle_days >= 3 && c.step < 9).length,
     contract_7days: active.filter(c => { const d = daysBetween(c.contract_date); return c.step < 10 && d !== null && d >= 0 && d <= 7; }).length,
@@ -415,7 +419,7 @@ function hanbaiStage(stage, c) {
   const k = HANBAI_MAP[n];
   return { step: k, label: lbl(k) };
 }
-hanbaiStage.cfg = { done: 14, signed: 11, ringi: 10, checklist: false };
+hanbaiStage.cfg = { done: 14, signed: 11, signedAt: 12, ringi: 10, checklist: false };
 
 const cases = collectDir(SHIIRE, stageInfo);
 const hanbaiCases = collectDir(HANBAI, hanbaiStage);
