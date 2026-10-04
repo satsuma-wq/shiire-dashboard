@@ -15,6 +15,15 @@
 | `gate.template.html` | 合言葉の入力画面 |
 | `collect.mjs` | nemo で5分ごとに走り、`~/shiire/*/case.json` を集めて `data.enc.json` を作って push |
 | `data.enc.json` | 暗号化した案件データ。画面は60秒ごとにこれを読み直す |
+| `page-src/*.html` | 単発ページの本体（平文・gitignore） |
+| `build-page.mjs` | `page-src/<name>.html` を**個別の合言葉**で暗号化して `<name>.html` を作る |
+| `koukai-kadai.html` | 掲載・公開まわりの確認事項一覧（2026-10-04・合言葉 `rtx2026`） |
+
+単発ページは合言葉がダッシュボードと別なので、`build.mjs`（`src/*.html` だけを見る）では作り直されません。
+
+```bash
+PASSPHRASE=rtx2026 node build-page.mjs koukai-kadai.html
+```
 
 ## 作り直すとき
 
