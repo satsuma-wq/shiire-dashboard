@@ -1,0 +1,8 @@
+node_modules/
+src/
+.DS_Store
+package-lock.json
+.env
+.omc/
+page-src/
+.last-fingerprint
